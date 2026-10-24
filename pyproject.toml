@@ -1,0 +1,43 @@
+[project]
+name = "nanoserve"
+version = "0.1.0"
+description = "A small vLLM-style LLM inference engine: paged KV cache, continuous batching, chunked prefill, prefix caching, a Triton decode kernel and an OpenAI-compatible server."
+readme = "README.md"
+authors = [
+    { name = "cipheraxat", email = "cipheraxat@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.110",
+    "httpx>=0.27",
+    "huggingface-hub>=0.23",
+    "safetensors>=0.4",
+    "torch>=2.5",
+    "transformers>=4.51",
+    "uvicorn[standard]>=0.29",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
+
+[project.scripts]
+nanoserve = "nanoserve.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]

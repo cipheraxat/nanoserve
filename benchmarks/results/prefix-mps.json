@@ -1,0 +1,32 @@
+{
+  "device": "Apple arm (MPS)",
+  "torch": "2.14.1",
+  "args": {
+    "model": "Qwen/Qwen3-0.6B",
+    "device": "auto",
+    "num_requests": 32,
+    "batch": 8,
+    "shared_len": 1024,
+    "suffix_len": 32,
+    "output_len": 32,
+    "token_budget": 1024
+  },
+  "results": [
+    {
+      "prefix_caching": "off",
+      "seconds": 100.37,
+      "tokens_computed": 34784,
+      "cache_hit_rate": "0%",
+      "ttft_p50_ms": 47064.6,
+      "ttft_p99_ms": 96947.1
+    },
+    {
+      "prefix_caching": "on",
+      "seconds": 15.11,
+      "tokens_computed": 3040,
+      "cache_hit_rate": "94%",
+      "ttft_p50_ms": 7086.0,
+      "ttft_p99_ms": 12181.5
+    }
+  ]
+}

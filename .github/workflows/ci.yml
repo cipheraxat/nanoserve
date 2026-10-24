@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install (CPU torch)
+        run: |
+          uv venv --python 3.12
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e . pytest ruff
+      - name: Lint
+        run: uv run --no-sync ruff check .
+      - name: Test
+        run: uv run --no-sync pytest -q

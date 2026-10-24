@@ -1,0 +1,35 @@
+{
+  "device": "Apple arm (MPS)",
+  "torch": "2.14.1",
+  "args": {
+    "model": "Qwen/Qwen3-0.6B",
+    "device": "auto",
+    "num_requests": 64,
+    "batch": 32,
+    "prompt_len": [
+      32,
+      512
+    ],
+    "output_len": [
+      16,
+      256
+    ],
+    "token_budget": 1024,
+    "kv_gb": 2.0
+  },
+  "results": [
+    {
+      "system": "nanoserve (continuous batching)",
+      "seconds": 144.95,
+      "output_tok_per_s": 60.0,
+      "steps": 423,
+      "ttft_p50_s": 22.52
+    },
+    {
+      "system": "HF transformers generate (static batching)",
+      "seconds": 172.98,
+      "output_tok_per_s": 50.3
+    }
+  ],
+  "speedup": 1.19
+}
