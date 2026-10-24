@@ -1,0 +1,41 @@
+{
+  "device": "NVIDIA L4",
+  "torch": "2.11.0+cu130",
+  "args": {
+    "model": "Qwen/Qwen3-0.6B",
+    "device": "auto",
+    "decoders": 16,
+    "decode_tokens": 160,
+    "long_prompts": 6,
+    "long_len": 2048,
+    "every": 20,
+    "budgets": [
+      10000000,
+      512,
+      256
+    ]
+  },
+  "results": [
+    {
+      "token_budget": "unlimited (no chunking)",
+      "seconds": 8.27,
+      "itl_p50_ms": 35.2,
+      "itl_p99_ms": 473.0,
+      "itl_max_ms": 473.8
+    },
+    {
+      "token_budget": 512,
+      "seconds": 6.95,
+      "itl_p50_ms": 34.5,
+      "itl_p99_ms": 129.6,
+      "itl_max_ms": 129.7
+    },
+    {
+      "token_budget": 256,
+      "seconds": 6.73,
+      "itl_p50_ms": 35.2,
+      "itl_p99_ms": 64.9,
+      "itl_max_ms": 65.4
+    }
+  ]
+}

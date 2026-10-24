@@ -26,7 +26,7 @@ def sh(cmd: str, required: bool = False) -> None:
 
 sh("nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv", required=True)
 sh(f"rm -rf /content/nanoserve && git clone --depth 1 {REPO} /content/nanoserve", required=True)
-sh("cd /content/nanoserve && pip install -q -e . pytest", required=True)
+sh("cd /content/nanoserve && pip install -q -e . pytest && pip install -q -U 'transformers>=4.56'", required=True)
 sh("cd /content/nanoserve && python -m pytest -q")
 bench = "cd /content/nanoserve/benchmarks && python"
 sh(f"{bench} bench_attention.py")

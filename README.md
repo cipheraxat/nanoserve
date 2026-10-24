@@ -15,8 +15,9 @@ a modern serving engine:
   stay cached in an LRU pool until the memory is needed.
 - **Preemption by recompute.** When the cache is full, the newest running request gives up its blocks and is requeued
   at the front. Its prefix is often still cached when it comes back.
-- **Triton paged-attention decode kernel.** On CUDA, decode steps read K/V straight from the block table with an online
-  softmax, instead of gathering them into a padded buffer.
+- **Triton paged-attention decode kernel.** On CUDA, every decode reads K/V straight from the block table with an online
+  softmax instead of gathering them into a padded buffer, including in steps that also carry prefill chunks. 14 to 19x
+  faster than the gather path at batch 16 to 64 on an L4.
 - **Packed batches.** All new tokens in a step are packed into one `[T]` dimension; only attention needs per-sequence
   structure. QKV and gate/up projections are fused into one matmul each.
 - **Sampling.** Temperature, top-k, top-p with one shared sort, and per-request seeds that give the same tokens no matter
@@ -99,7 +100,63 @@ Useful flags: `--max-num-seqs`, `--max-num-batched-tokens` (the chunked-prefill 
 All runs use Qwen3-0.6B in bf16 with greedy decoding and `ignore_eos`, so every request generates exactly the tokens
 it asked for.
 
+### NVIDIA L4 (Colab, torch 2.11 + CUDA 13, Triton 3.6)
+
+**Continuous batching vs static batching.** 128 requests with 32 to 512 prompt tokens and 16 to 256 output tokens,
+at most 64 in flight:
+
+| system | time | output tok/s |
+|---|---|---|
+| nanoserve (continuous batching, paged KV, Triton decode) | 20.5 s | 915 |
+| Hugging Face `generate`, static batches of 64 | 80.7 s | 233 |
+
+3.9x the throughput. Static batching pads every batch to its longest prompt and keeps decoding until its longest
+request is done; continuous batching refills the slot as soon as a request finishes.
+
+**Triton paged decode kernel vs torch gather + SDPA**, one attention layer at Qwen3-0.6B's shape (16 query heads,
+8 KV heads, head dim 128), bf16:
+
+| batch | context | torch gather | Triton paged | speedup |
+|---|---|---|---|---|
+| 1 | 2,048 | 0.46 ms | 0.18 ms | 2.5x |
+| 16 | 2,048 | 10.86 ms | 0.62 ms | 17.4x |
+| 64 | 512 | 10.65 ms | 0.58 ms | 18.5x |
+| 64 | 2,048 | 43.76 ms | 2.66 ms | 16.4x |
+| 64 | 8,192 | 171.71 ms | 12.50 ms | 13.7x |
+
+Max absolute difference from the reference is within bf16 rounding (at most 5e-4).
+
+The kernel only paid off once it handled every decode. Under continuous batching most steps carry a prefill chunk
+next to the running decodes, and at first those mixed steps sent every sequence down the gather path. With that
+design nanoserve reached only 168 tok/s on the benchmark above, slower than Hugging Face. The engine now splits each
+step: decodes go through the kernel, prefill chunks through the gather path, and the results are scattered back into
+the packed batch. That took throughput from 168 to 915 tok/s.
+
+**Prefix caching.** 32 requests share a 1,024-token system prompt, each with a different 32-token suffix and 32 output
+tokens:
+
+| prefix caching | total time | prompt tokens computed | cache hit rate | TTFT p50 | TTFT p99 |
+|---|---|---|---|---|---|
+| off | 11.1 s | 34,784 | 0% | 5.22 s | 10.00 s |
+| on | 4.9 s | 3,040 | 94% | 2.03 s | 3.82 s |
+
+11x less prefill work, 2.3x faster end to end, 2.6x lower median TTFT.
+
+**Chunked prefill.** 16 requests are decoding while six 2,048-token prompts arrive. Inter-token latency (ITL) seen by the
+decoding requests:
+
+| token budget per step | ITL p50 | ITL p99 | ITL max |
+|---|---|---|---|
+| unlimited (whole prompt in one step) | 35 ms | 473 ms | 474 ms |
+| 512 | 35 ms | 130 ms | 130 ms |
+| 256 | 35 ms | 65 ms | 65 ms |
+
+A 256-token budget cuts the worst decode stall 7.3x with no change to median ITL.
+
 ### Apple M4, 16 GB (MPS)
+
+These were taken before the decode/prefill split, which only matters on CUDA.
+
 
 **Prefix caching.** 32 requests share a 1,024-token system prompt, each with a different 32-token suffix and 32 output
 tokens:
@@ -130,7 +187,9 @@ On this machine MPS is limited by kernel launch overhead and memory pressure: a 
 
 Reproduce with the scripts in [`benchmarks/`](benchmarks/) (`bench_offline.py`, `bench_prefix.py`, `bench_chunked.py`,
 `bench_attention.py`, and `bench_serving.py` for an online Poisson load test against a running server). Raw JSON is in
-[`benchmarks/results/`](benchmarks/results/).
+[`benchmarks/results/`](benchmarks/results/). The L4 numbers come from one Colab run that cloned this repo at the
+split-attention commit, ran the test suite on the GPU, then ran the four benchmarks;
+[`scripts/colab_gpu_bench.py`](scripts/colab_gpu_bench.py) does the same through the `colab` CLI.
 
 ## Tests
 
@@ -141,8 +200,9 @@ uv run pytest -q
 The tests build a tiny random Qwen3 with Hugging Face `transformers`, load the same weights into nanoserve, and require
 identical greedy tokens across batching, chunking, prefix caching and preemption. They also cover the block manager,
 scheduler, sampler (top-k/top-p against a brute-force reference, distribution, seeds), the HTTP server (streaming,
-validation, concurrency, metrics), and the Triton kernel against the torch path (on CUDA). They run on CPU without
-downloading anything.
+validation, concurrency, metrics), the decode/prefill split (on CPU, with a torch stand-in for the kernel), and on CUDA
+the Triton kernel against the torch path plus an end-to-end engine run. Everything except the CUDA tests runs on CPU
+without downloading anything; all 40 pass on an L4.
 
 ## Notes and limits
 

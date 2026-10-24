@@ -1,0 +1,35 @@
+{
+  "device": "NVIDIA L4",
+  "torch": "2.11.0+cu130",
+  "args": {
+    "model": "Qwen/Qwen3-0.6B",
+    "device": "auto",
+    "num_requests": 128,
+    "batch": 64,
+    "prompt_len": [
+      32,
+      512
+    ],
+    "output_len": [
+      16,
+      256
+    ],
+    "token_budget": 1024,
+    "kv_gb": 2.0
+  },
+  "results": [
+    {
+      "system": "nanoserve (continuous batching)",
+      "seconds": 20.53,
+      "output_tok_per_s": 915.3,
+      "steps": 478,
+      "ttft_p50_s": 3.01
+    },
+    {
+      "system": "HF transformers generate (static batching)",
+      "seconds": 80.65,
+      "output_tok_per_s": 233.0
+    }
+  ],
+  "speedup": 3.93
+}

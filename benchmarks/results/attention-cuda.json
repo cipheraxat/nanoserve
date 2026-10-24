@@ -1,0 +1,78 @@
+{
+  "device": "NVIDIA L4",
+  "torch": "2.11.0+cu130",
+  "results": [
+    {
+      "batch": 1,
+      "context": 512,
+      "torch_gather_ms": 0.454,
+      "triton_paged_ms": 0.048,
+      "speedup": "9.5x",
+      "max_abs_err": "4.9e-04"
+    },
+    {
+      "batch": 1,
+      "context": 2048,
+      "torch_gather_ms": 0.461,
+      "triton_paged_ms": 0.183,
+      "speedup": "2.5x",
+      "max_abs_err": "0.0e+00"
+    },
+    {
+      "batch": 1,
+      "context": 8192,
+      "torch_gather_ms": 2.656,
+      "triton_paged_ms": 0.737,
+      "speedup": "3.6x",
+      "max_abs_err": "7.6e-06"
+    },
+    {
+      "batch": 16,
+      "context": 512,
+      "torch_gather_ms": 2.627,
+      "triton_paged_ms": 0.141,
+      "speedup": "18.6x",
+      "max_abs_err": "2.4e-04"
+    },
+    {
+      "batch": 16,
+      "context": 2048,
+      "torch_gather_ms": 10.857,
+      "triton_paged_ms": 0.622,
+      "speedup": "17.4x",
+      "max_abs_err": "2.4e-04"
+    },
+    {
+      "batch": 16,
+      "context": 8192,
+      "torch_gather_ms": 42.867,
+      "triton_paged_ms": 2.764,
+      "speedup": "15.5x",
+      "max_abs_err": "6.1e-05"
+    },
+    {
+      "batch": 64,
+      "context": 512,
+      "torch_gather_ms": 10.649,
+      "triton_paged_ms": 0.576,
+      "speedup": "18.5x",
+      "max_abs_err": "4.9e-04"
+    },
+    {
+      "batch": 64,
+      "context": 2048,
+      "torch_gather_ms": 43.756,
+      "triton_paged_ms": 2.661,
+      "speedup": "16.4x",
+      "max_abs_err": "4.9e-04"
+    },
+    {
+      "batch": 64,
+      "context": 8192,
+      "torch_gather_ms": 171.708,
+      "triton_paged_ms": 12.499,
+      "speedup": "13.7x",
+      "max_abs_err": "2.4e-04"
+    }
+  ]
+}
