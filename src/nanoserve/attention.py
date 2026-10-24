@@ -10,7 +10,8 @@ Two backends:
     sequence's cached length. Works for any mix of prefill chunks and decodes, on CPU, MPS
     and CUDA.
   * triton: a decode kernel that reads K/V straight from the block table with an online
-    softmax, so nothing is gathered. Used on CUDA for decode-only steps.
+    softmax, so nothing is gathered. On CUDA every sequence with one new token in the step
+    (a decode) uses it, even when other sequences in the same step are prefilling.
 """
 
 from __future__ import annotations
@@ -22,16 +23,31 @@ import torch.nn.functional as F
 
 
 @dataclass
-class AttentionMetadata:
-    slot_mapping: torch.Tensor  # [T] flat cache slot for every new token
-    query_index: torch.Tensor  # [B, Lq] packed index of each sequence's queries (padded)
-    output_index: torch.Tensor  # [T] position of each packed query in the flattened [B * Lq] output
+class GatherAttentionMetadata:
+    """Sequences that go through the torch path: prefill chunks, or every sequence when the
+    Triton kernel is not in use. Indices are local to this group's queries."""
+
+    query_index: torch.Tensor  # [B, Lq] index of each sequence's queries in the group (padded)
+    output_index: torch.Tensor  # [T_g] position of each group query in the flattened [B * Lq] output
     key_slots: torch.Tensor  # [B, Lk] flat cache slot of every context token (padded)
     attn_mask: torch.Tensor  # [B, 1, Lq, Lk] bool, True where the query may attend
+    token_index: torch.Tensor | None = None  # the group's rows in the packed batch; None means all rows
+
+
+@dataclass
+class DecodeAttentionMetadata:
+    """Sequences with exactly one new token this step, handled by the Triton kernel."""
+
     block_tables: torch.Tensor  # [B, max_blocks] int32, padded with 0
     context_lens: torch.Tensor  # [B] int32, cached + new tokens
-    is_decode_only: bool
-    use_triton_decode: bool = False
+    token_index: torch.Tensor | None = None
+
+
+@dataclass
+class AttentionMetadata:
+    slot_mapping: torch.Tensor  # [T] flat cache slot for every new token
+    gather: GatherAttentionMetadata | None = None
+    decode: DecodeAttentionMetadata | None = None
 
 
 def write_kv(
@@ -44,10 +60,10 @@ def write_kv(
 
 
 def paged_attention_torch(
-    q: torch.Tensor,  # [T, H_q, D]
+    q: torch.Tensor,  # [T_g, H_q, D]
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    meta: AttentionMetadata,
+    meta: GatherAttentionMetadata,
     scale: float,
 ) -> torch.Tensor:
     num_blocks, block_size, num_kv_heads, head_dim = k_cache.shape
@@ -71,7 +87,13 @@ def paged_attention_torch(
         enable_gqa=num_q_heads != num_kv_heads,
     )
     out = out.transpose(1, 2).reshape(batch * max_q, num_q_heads, head_dim)
-    return out.index_select(0, meta.output_index)  # back to packed [T, H_q, D]
+    return out.index_select(0, meta.output_index)  # back to packed [T_g, H_q, D]
+
+
+def _decode(q, k_cache, v_cache, meta: DecodeAttentionMetadata, scale):
+    from nanoserve.triton_attention import paged_decode_attention
+
+    return paged_decode_attention(q, k_cache, v_cache, meta.block_tables, meta.context_lens, scale)
 
 
 def paged_attention(
@@ -81,8 +103,14 @@ def paged_attention(
     meta: AttentionMetadata,
     scale: float,
 ) -> torch.Tensor:
-    if meta.use_triton_decode:
-        from nanoserve.triton_attention import paged_decode_attention
-
-        return paged_decode_attention(q, k_cache, v_cache, meta.block_tables, meta.context_lens, scale)
-    return paged_attention_torch(q, k_cache, v_cache, meta, scale)
+    """Attention for a packed step. Decodes and prefill chunks can take different kernels;
+    each group's output is scattered back to its rows of the packed batch."""
+    parts = [(meta.decode, _decode), (meta.gather, paged_attention_torch)]
+    parts = [(m, fn) for m, fn in parts if m is not None]
+    if len(parts) == 1 and parts[0][0].token_index is None:
+        m, fn = parts[0]
+        return fn(q, k_cache, v_cache, m, scale)
+    out = torch.empty_like(q)
+    for m, fn in parts:
+        out.index_copy_(0, m.token_index, fn(q.index_select(0, m.token_index), k_cache, v_cache, m, scale))
+    return out

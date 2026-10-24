@@ -8,7 +8,7 @@ import argparse
 import torch
 from common import device_name, save, table
 
-from nanoserve.attention import AttentionMetadata, paged_attention_torch
+from nanoserve.attention import GatherAttentionMetadata, paged_attention_torch
 from nanoserve.triton_attention import paged_decode_attention
 
 
@@ -23,17 +23,13 @@ def setup(batch, ctx_len, block_size=16, h_q=16, h_kv=8, d=128, dtype=torch.bflo
     q = torch.randn(batch, h_q, d, device=dev, dtype=dtype)
     k_pos = torch.arange(ctx_len, device=dev)
     key_slots = tables.long().gather(1, (k_pos // block_size).expand(batch, -1)) * block_size + k_pos % block_size
-    meta = AttentionMetadata(
-        slot_mapping=torch.empty(0, dtype=torch.long, device=dev),
+    meta = GatherAttentionMetadata(
         query_index=torch.arange(batch, device=dev).view(batch, 1),
         output_index=torch.arange(batch, device=dev),
         key_slots=key_slots,
         attn_mask=(k_pos.view(1, 1, 1, -1) < ctx.view(-1, 1, 1, 1)),
-        block_tables=tables,
-        context_lens=ctx,
-        is_decode_only=True,
     )
-    return q, k_cache, v_cache, meta
+    return q, k_cache, v_cache, meta, tables, ctx
 
 
 def time_ms(fn, iters=50) -> float:
@@ -60,15 +56,13 @@ def main() -> None:
     rows = []
     for batch in args.batches:
         for ctx in args.ctx:
-            q, k, v, meta = setup(batch, ctx)
+            q, k, v, meta, tables, ctx_t = setup(batch, ctx)
             ref = paged_attention_torch(q, k, v, meta, SCALE)
-            out = paged_decode_attention(q, k, v, meta.block_tables, meta.context_lens, SCALE)
+            out = paged_decode_attention(q, k, v, tables, ctx_t, SCALE)
             err = (out.float() - ref.float()).abs().max().item()
             t_torch = time_ms(lambda q=q, k=k, v=v, meta=meta: paged_attention_torch(q, k, v, meta, SCALE))
             t_triton = time_ms(
-                lambda q=q, k=k, v=v, meta=meta: paged_decode_attention(
-                    q, k, v, meta.block_tables, meta.context_lens, SCALE
-                )
+                lambda q=q, k=k, v=v, tables=tables, ctx_t=ctx_t: paged_decode_attention(q, k, v, tables, ctx_t, SCALE)
             )
             rows.append(
                 {

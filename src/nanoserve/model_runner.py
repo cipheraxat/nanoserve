@@ -5,7 +5,7 @@ import os
 
 import torch
 
-from nanoserve.attention import AttentionMetadata
+from nanoserve.attention import AttentionMetadata, DecodeAttentionMetadata, GatherAttentionMetadata
 from nanoserve.config import EngineConfig
 from nanoserve.models.qwen3 import Qwen3ForCausalLM, RotaryEmbedding, rope_theta_of
 from nanoserve.scheduler import ScheduledSeq
@@ -87,42 +87,18 @@ class ModelRunner:
     def _to_device(self, data, dtype=torch.int64) -> torch.Tensor:
         return torch.tensor(data, dtype=dtype).to(self.device, non_blocking=True)
 
-    def prepare(self, scheduled: list[ScheduledSeq]):
-        bs = self.block_size
-        input_ids: list[int] = []
-        positions: list[int] = []
-        slots: list[int] = []
-        q_lens: list[int] = []
-        ctx_lens: list[int] = []
-        tables: list[list[int]] = []
-        logits_index: list[int] = []
-        sample_seqs: list[Sequence] = []
-        max_q = max(item.num_tokens for item in scheduled)
-        output_index: list[int] = []
+    def _gather_meta(self, group: list[tuple[int, int, int, list[int]]], packed: bool) -> GatherAttentionMetadata:
+        """Metadata for the torch path. `group` holds (packed start, q_len, ctx_len, block table)."""
+        bs, dev = self.block_size, self.device
+        q_lens = [g[1] for g in group]
+        ctx_lens = [g[2] for g in group]
+        max_q, max_ctx = max(q_lens), max(ctx_lens)
+        max_blocks = max(len(g[3]) for g in group)
+        tables = self._to_device([g[3] + [0] * (max_blocks - len(g[3])) for g in group])
+        output_index = [i * max_q + j for i, n in enumerate(q_lens) for j in range(n)]
 
-        for item in scheduled:
-            seq, n = item.seq, item.num_tokens
-            start = seq.num_computed_tokens
-            table = seq.block_table
-            input_ids.extend(seq.token_ids[start : start + n])
-            positions.extend(range(start, start + n))
-            slots.extend(table[p // bs] * bs + p % bs for p in range(start, start + n))
-            output_index.extend(range(len(q_lens) * max_q, len(q_lens) * max_q + n))
-            q_lens.append(n)
-            ctx_lens.append(start + n)
-            tables.append(table)
-            if start + n == seq.num_tokens:
-                logits_index.append(len(input_ids) - 1)
-                sample_seqs.append(seq)
-
-        max_blocks = max(len(t) for t in tables)
-        padded_tables = [t + [0] * (max_blocks - len(t)) for t in tables]
-        dev = self.device
         q_len_t = self._to_device(q_lens)
         ctx_t = self._to_device(ctx_lens)
-        block_tables = self._to_device(padded_tables, torch.int32)
-
-        max_ctx = max(ctx_lens)
         q_start = torch.cumsum(q_len_t, 0) - q_len_t
         j = torch.arange(max_q, device=dev)
         query_valid = j.unsqueeze(0) < q_len_t.unsqueeze(1)
@@ -130,20 +106,55 @@ class ModelRunner:
         query_pos = (ctx_t - q_len_t).unsqueeze(1) + j.unsqueeze(0)
         k_pos = torch.arange(max_ctx, device=dev)
         attn_mask = (k_pos.view(1, 1, -1) <= query_pos.unsqueeze(2)) & (k_pos.view(1, 1, -1) < ctx_t.view(-1, 1, 1))
-        block_idx = (k_pos // bs).clamp(max=max_blocks - 1).unsqueeze(0).expand(len(tables), -1)
-        key_slots = block_tables.long().gather(1, block_idx) * bs + (k_pos % bs).unsqueeze(0)
-
-        is_decode_only = max_q == 1
-        meta = AttentionMetadata(
-            slot_mapping=self._to_device(slots),
+        block_idx = (k_pos // bs).clamp(max=max_blocks - 1).unsqueeze(0).expand(len(group), -1)
+        key_slots = tables.gather(1, block_idx) * bs + (k_pos % bs).unsqueeze(0)
+        token_index = None
+        if not packed:
+            token_index = self._to_device([g[0] + j for g in group for j in range(g[1])])
+        return GatherAttentionMetadata(
             query_index=query_index,
             output_index=self._to_device(output_index),
             key_slots=key_slots,
             attn_mask=attn_mask.unsqueeze(1),
-            block_tables=block_tables,
-            context_lens=ctx_t.int(),
-            is_decode_only=is_decode_only,
-            use_triton_decode=self.use_triton and is_decode_only,
+            token_index=token_index,
+        )
+
+    def _decode_meta(self, group: list[tuple[int, int, int, list[int]]], packed: bool) -> DecodeAttentionMetadata:
+        max_blocks = max(len(g[3]) for g in group)
+        return DecodeAttentionMetadata(
+            block_tables=self._to_device([g[3] + [0] * (max_blocks - len(g[3])) for g in group], torch.int32),
+            context_lens=self._to_device([g[2] for g in group], torch.int32),
+            token_index=None if packed else self._to_device([g[0] for g in group]),
+        )
+
+    def prepare(self, scheduled: list[ScheduledSeq]):
+        bs = self.block_size
+        input_ids: list[int] = []
+        positions: list[int] = []
+        slots: list[int] = []
+        logits_index: list[int] = []
+        sample_seqs: list[Sequence] = []
+        decodes: list[tuple[int, int, int, list[int]]] = []
+        others: list[tuple[int, int, int, list[int]]] = []
+
+        for item in scheduled:
+            seq, n = item.seq, item.num_tokens
+            start = seq.num_computed_tokens
+            table = seq.block_table
+            entry = (len(input_ids), n, start + n, table)
+            (decodes if n == 1 and self.use_triton else others).append(entry)
+            input_ids.extend(seq.token_ids[start : start + n])
+            positions.extend(range(start, start + n))
+            slots.extend(table[p // bs] * bs + p % bs for p in range(start, start + n))
+            if start + n == seq.num_tokens:
+                logits_index.append(len(input_ids) - 1)
+                sample_seqs.append(seq)
+
+        # Each group covers the whole packed batch only when the other group is empty.
+        meta = AttentionMetadata(
+            slot_mapping=self._to_device(slots),
+            decode=self._decode_meta(decodes, packed=not others) if decodes else None,
+            gather=self._gather_meta(others, packed=not decodes) if others else None,
         )
         return (
             self._to_device(input_ids),

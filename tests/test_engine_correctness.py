@@ -123,3 +123,33 @@ def test_seeded_sampling_is_reproducible_across_batches(make_engine):
         [prompt] + prompts(3, seed=10), [params] + [SamplingParams(max_tokens=10, temperature=1.0)] * 3
     )[0]
     assert alone == batched
+
+
+def test_mixed_decode_and_prefill_routing(make_engine, tiny_hf, monkeypatch):
+    """With the decode kernel on, a step can hold decodes (kernel) next to prefill chunks
+    (gather path). Swap the kernel for a torch reference so the split and the scatter back
+    into the packed batch are checked on any machine."""
+    import nanoserve.attention as attention
+
+    def reference_decode(q, k_cache, v_cache, meta, scale):
+        block_size = k_cache.shape[1]
+        max_ctx = int(meta.context_lens.max())
+        k_pos = torch.arange(max_ctx)
+        blocks = meta.block_tables.long().gather(
+            1, (k_pos // block_size).clamp(max=meta.block_tables.shape[1] - 1).expand(len(q), -1)
+        )
+        gather = attention.GatherAttentionMetadata(
+            query_index=torch.arange(len(q)).view(-1, 1),
+            output_index=torch.arange(len(q)),
+            key_slots=blocks * block_size + k_pos % block_size,
+            attn_mask=(k_pos.view(1, 1, 1, -1) < meta.context_lens.view(-1, 1, 1, 1)),
+        )
+        calls.append(len(q))
+        return attention.paged_attention_torch(q, k_cache, v_cache, gather, scale)
+
+    calls: list[int] = []
+    monkeypatch.setattr(attention, "_decode", reference_decode)
+    engine = make_engine(max_num_batched_tokens=10, max_num_seqs=6)
+    engine.runner.use_triton = True
+    check_matches_hf(engine, tiny_hf, prompts(6, seed=11, lo=5, hi=40))
+    assert calls, "decode path never used"
